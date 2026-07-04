@@ -1,0 +1,191 @@
+// Prisma schema — see Section 2 of the implementation plan for the
+// full reasoning behind each table. Run `npm run db:migrate` after
+// filling in .env to create these tables in Supabase Postgres.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum WinType {
+  discard
+  self_draw
+  manual
+}
+
+model Player {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  icon        String? // emoji or a Supabase Storage image URL
+  archived    Boolean  @default(false)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  gameScores       GameScore[]
+  eloState         EloState?
+  eloHistory       EloHistory[]
+  wonGames         Game[]        @relation("WinnerGames")
+  lostGames        Game[]        @relation("LoserGames")
+  sessionSeats     SessionTable[]
+  sessionSidelines SessionSideline[]
+  seasonHistory    SeasonHistory[]
+
+  @@map("players")
+}
+
+model Game {
+  id           String    @id @default(uuid())
+  playedAt     DateTime  @default(now()) @map("played_at")
+  tableNumber  Int?      @map("table_number")
+  fan          Int? // 3-13, null for manual/legacy entries
+  winType      WinType?  @map("win_type")
+  winnerId     String?   @map("winner_id")
+  winner       Player?   @relation("WinnerGames", fields: [winnerId], references: [id])
+  loserId      String?   @map("loser_id")
+  loser        Player?   @relation("LoserGames", fields: [loserId], references: [id])
+  sessionId    String?   @map("session_id")
+  session      Session?  @relation(fields: [sessionId], references: [id])
+  seasonId     String?   @map("season_id")
+  season       Season?   @relation(fields: [seasonId], references: [id])
+  createdBy    String?   @map("created_by")
+
+  scores     GameScore[]
+  eloHistory EloHistory[]
+
+  @@map("games")
+  @@index([playedAt])
+  @@index([seasonId])
+}
+
+// One row per player per game — replaces the wide "one column per
+// player" layout of the old Game Scores sheet.
+model GameScore {
+  gameId   String @map("game_id")
+  playerId String @map("player_id")
+  score    Decimal
+
+  game   Game   @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@id([gameId, playerId])
+  @@map("game_scores")
+}
+
+// Current, denormalized ELO per player — fast reads for the leaderboard.
+model EloState {
+  playerId     String   @id @map("player_id")
+  rating       Decimal  @default(1500)
+  gamesPlayed  Int      @default(0) @map("games_played")
+  peakRating   Decimal  @default(1500) @map("peak_rating")
+  last5Deltas  Decimal[] @default([]) @map("last5_deltas")
+
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@map("elo_state")
+}
+
+// One snapshot row per game per player — powers the ELO progression chart.
+model EloHistory {
+  id          BigInt   @id @default(autoincrement())
+  gameId      String   @map("game_id")
+  playerId    String   @map("player_id")
+  ratingAfter Decimal  @map("rating_after")
+  delta       Decimal
+  playedAt    DateTime @map("played_at")
+
+  game   Game   @relation(fields: [gameId], references: [id])
+  player Player @relation(fields: [playerId], references: [id])
+
+  @@map("elo_history")
+  @@index([playerId, playedAt])
+}
+
+// Live session — replaces the "Table Arrangements" key/value sheet.
+model Session {
+  id          String    @id @default(uuid())
+  active      Boolean   @default(true)
+  tableCount  Int       @default(2) @map("table_count")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  endedAt     DateTime? @map("ended_at")
+
+  games    Game[]
+  tables   SessionTable[]
+  sideline SessionSideline[]
+
+  @@map("sessions")
+}
+
+model SessionTable {
+  sessionId    String @map("session_id")
+  tableNumber  Int    @map("table_number")
+  seatPosition Int?   @map("seat_position")
+  playerId     String @map("player_id")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player  Player  @relation(fields: [playerId], references: [id])
+
+  @@id([sessionId, tableNumber, playerId])
+  @@map("session_tables")
+}
+
+model SessionSideline {
+  sessionId String @map("session_id")
+  playerId  String @map("player_id")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  player  Player  @relation(fields: [playerId], references: [id])
+
+  @@id([sessionId, playerId])
+  @@map("session_sideline")
+}
+
+// --- Seasons ---------------------------------------------------------
+// A season is a bounded competitive period. Games are tagged with the
+// active season's id. Ending a season snapshots final standings into
+// `season_history` (which is NEVER cleared) and optionally clears the
+// live per-game tables — see prisma/sql/end_season.sql for the
+// transactional procedure that does both safely.
+model Season {
+  id           String    @id @default(uuid())
+  seasonNumber Int       @unique @map("season_number") // 1, 2, 3… for ordering/display
+  name         String    // e.g. "Season 1 — Spring 2026"
+  startedAt    DateTime  @default(now()) @map("started_at")
+  endedAt      DateTime? @map("ended_at")
+  isActive     Boolean   @default(false) @map("is_active")
+
+  games   Game[]
+  history SeasonHistory[]
+
+  @@map("seasons")
+}
+
+// Permanent, never-truncated snapshot of each player's final standing
+// in a closed season — this is what powers /hall-of-fame. Small and
+// append-only: one row per player per season, forever.
+model SeasonHistory {
+  seasonId       String  @map("season_id")
+  playerId       String  @map("player_id")
+  finalRank      Int     @map("final_rank")       // ranked by total_score, matches live leaderboard sort
+  totalScore     Decimal @map("total_score")
+  eloRank        Int     @map("elo_rank")
+  finalElo       Decimal @map("final_elo")
+  peakElo        Decimal @map("peak_elo")
+  gamesPlayed    Int     @map("games_played")
+  gamesWon       Int     @map("games_won")
+  gamesLost      Int     @map("games_lost")
+  bestWin        Decimal @map("best_win")
+  worstLoss      Decimal @map("worst_loss")
+  title          String  // title tier at season close, e.g. "Messiah"
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  season Season @relation(fields: [seasonId], references: [id], onDelete: Cascade)
+  player Player @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@id([seasonId, playerId])
+  @@map("season_history")
+  @@index([playerId])
+}
