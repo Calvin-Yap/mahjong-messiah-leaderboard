@@ -1,9 +1,24 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
+import type { EmojiClickData } from "emoji-picker-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import clsx from "clsx";
+
+// emoji-picker-react touches `window` at import time, so it can only ever
+// render on the client — dynamic-import it with ssr disabled rather than
+// a plain top-level import, or Next.js's server render of this modal's
+// parent tree would blow up.
+const FullEmojiPicker = dynamic(() => import("emoji-picker-react"), {
+  ssr: false,
+  loading: () => (
+    <p className="py-6 text-center text-sm text-ink-400">
+      Loading emoji picker…
+    </p>
+  ),
+});
 
 // Quick emoji list ported from buildAddPlayerDialog() in code.gs.
 const QUICK_EMOJI = [
@@ -65,9 +80,9 @@ export function AddPlayerModal({
   onClose,
   onCreated,
 }: AddPlayerModalProps) {
-  const [tab, setTab] = useState<"emoji" | "image">("emoji");
   const [name, setName] = useState("");
   const [emoji, setEmoji] = useState("");
+  const [showFullPicker, setShowFullPicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -118,49 +133,65 @@ export function AddPlayerModal({
       <label className="mb-1 block text-xs font-bold uppercase tracking-wide text-ink-400">
         Player icon
       </label>
-      <div className="mb-3 flex gap-1 rounded-lg bg-ink-50 p-1">
-        <button
-          className={clsx(
-            "flex-1 rounded-md py-1.5 text-sm font-semibold",
-            tab === "emoji" ? "bg-brand-500 text-white" : "text-ink-500",
-          )}
-          onClick={() => setTab("emoji")}
-        >
-          😀 Emoji
-        </button>
+
+      <input
+        className="mb-3 w-full rounded-lg border border-ink-100 px-3 py-2 text-center text-lg focus:border-brand-500 focus:outline-none"
+        placeholder="Paste or type emoji…"
+        value={emoji}
+        onChange={(e) => setEmoji(e.target.value)}
+      />
+      <div className="grid grid-cols-8 gap-2">
+        {QUICK_EMOJI.map((e) => {
+          const used = existingIcons.includes(e);
+          return (
+            <button
+              key={e}
+              disabled={used}
+              title={used ? "Already in use" : `Select ${e}`}
+              onClick={() => setEmoji(e)}
+              className={clsx(
+                "flex h-9 items-center justify-center rounded-lg border text-lg",
+                used
+                  ? "cursor-not-allowed border-ink-100 opacity-30"
+                  : emoji === e
+                    ? "border-brand-500 bg-brand-50"
+                    : "border-ink-100 hover:border-brand-500",
+              )}
+            >
+              {e}
+            </button>
+          );
+        })}
       </div>
 
-      <>
-        <input
-          className="mb-3 w-full rounded-lg border border-ink-100 px-3 py-2 text-center text-lg focus:border-brand-500 focus:outline-none"
-          placeholder="Paste or type emoji…"
-          value={emoji}
-          onChange={(e) => setEmoji(e.target.value)}
-        />
-        <div className="grid grid-cols-8 gap-2">
-          {QUICK_EMOJI.map((e) => {
-            const used = existingIcons.includes(e);
-            return (
-              <button
-                key={e}
-                disabled={used}
-                title={used ? "Already in use" : `Select ${e}`}
-                onClick={() => setEmoji(e)}
-                className={clsx(
-                  "flex h-9 items-center justify-center rounded-lg border text-lg",
-                  used
-                    ? "cursor-not-allowed border-ink-100 opacity-30"
-                    : emoji === e
-                      ? "border-brand-500 bg-brand-50"
-                      : "border-ink-100 hover:border-brand-500",
-                )}
-              >
-                {e}
-              </button>
-            );
-          })}
+      <button
+        type="button"
+        onClick={() => setShowFullPicker((v) => !v)}
+        className="mt-2 text-xs font-semibold text-brand-600 hover:underline"
+      >
+        {showFullPicker ? "▲ Hide full emoji list" : "🔍 Browse all emojis…"}
+      </button>
+
+      {showFullPicker && (
+        <div className="mt-2 overflow-hidden rounded-lg border border-ink-100">
+          <FullEmojiPicker
+            width="100%"
+            height={320}
+            previewConfig={{ showPreview: false }}
+            onEmojiClick={(data: EmojiClickData) => {
+              if (existingIcons.includes(data.emoji)) {
+                setError(
+                  "That icon is already used by another player. Please choose a different one.",
+                );
+                return;
+              }
+              setError(null);
+              setEmoji(data.emoji);
+              setShowFullPicker(false);
+            }}
+          />
         </div>
-      </>
+      )}
 
       {error && (
         <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-lose">
