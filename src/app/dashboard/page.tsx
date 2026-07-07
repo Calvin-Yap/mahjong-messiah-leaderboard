@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 /**
  * DASHBOARD — /dashboard
@@ -6,49 +6,143 @@
  * multi-select player filter, session-player preset).
  *
  * TODO(page):
- *   - [ ] On mount: fetch('/api/dashboard/scores') and fetch('/api/elo/history'),
- *         store in state instead of the MOCK_* constants below.
- *   - [ ] Fetch current session participants (GET /api/sessions?active=true)
- *         to power the "Session Players" quick-filter button.
+ *   - [ ] "Session Players" currently behaves like "Select All" — wire it to
+ *         GET /api/sessions?active=true once /session has a real backing
+ *         session, and filter to that session's seated + sideline players.
  *   - [ ] Replace the two plain date inputs with a real dual-range slider
- *         (e.g. `react-range` or a small custom component) matching the
- *         draggable min/max handles in the screenshot.
+ *         (e.g. `react-range`) and actually filter `data` by the selected
+ *         range before rendering — the inputs render but don't filter yet.
  *   - [ ] Add the "Rank Over Time" bump chart using LineChartPanel with
- *         reverseYAxis — data already comes back as `ranks` per game from
- *         /api/dashboard/scores.
+ *         reverseYAxis — `ranks` is already returned per game by the API.
  *   - [ ] Add the "Average ELO per Game Played" bar chart (Chart.js bar,
  *         not line — new chart type, not yet scaffolded here).
- *   - [ ] "Update Charts" should be the only thing that re-renders the
- *         (possibly expensive) charts — keep filter state separate from
- *         the state actually passed into LineChartPanel, exactly like the
- *         original sidebar's explicit "Update Charts" button.
  */
 
-import { useMemo, useState } from 'react';
-import { Card } from '@/components/ui/Card';
-import { Button } from '@/components/ui/Button';
-import { PlayerFilterChips } from '@/components/dashboard/PlayerFilterChips';
-import { LineChartPanel } from '@/components/dashboard/LineChartPanel';
+import { useEffect, useMemo, useState } from "react";
+import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { PlayerFilterChips } from "@/components/dashboard/PlayerFilterChips";
+import { LineChartPanel } from "@/components/dashboard/LineChartPanel";
+import type { DashboardScoresDTO, EloHistoryDTO } from "@/lib/types";
 
-// TODO(api): replace with real data from /api/dashboard/scores + /api/elo/history
-const MOCK_PLAYERS = ['Kendall', 'Matt', 'Brian', 'Monica', 'Michael', 'Kesler'];
-const MOCK_LABELS = ['03/30', '04/05', '04/12', '04/20', '04/28', '05/05'];
-const MOCK_SCORES = MOCK_PLAYERS.map((_, i) =>
-  MOCK_LABELS.map((_, j) => (i + 1) * 120 + j * 40 * (i % 2 === 0 ? 1 : -1))
-);
+/**
+ * Computes fixed axis bounds from ALL series (every player), not just the
+ * currently-selected ones. This is what keeps the Y axis stable when
+ * toggling players — computing bounds from only the visible/selected
+ * series is exactly what caused the axis to stretch/jump on every
+ * selection change, since Chart.js auto-scales to whatever's passed in.
+ */
+function computeStableBounds(valuesByPlayer: (number | null)[][]): {
+  min: number;
+  max: number;
+} {
+  const flat = valuesByPlayer.flat().filter((v): v is number => v !== null);
+  if (flat.length === 0) return { min: 0, max: 1 };
+
+  const dataMin = Math.min(...flat);
+  const dataMax = Math.max(...flat);
+  const range = dataMax - dataMin || Math.abs(dataMax) || 1;
+  const padding = range * 0.1;
+
+  // Round to a "nice" step so the axis doesn't show awkward decimals.
+  const niceStep = Math.pow(10, Math.floor(Math.log10(range)) - 1) || 1;
+  return {
+    min: Math.floor((dataMin - padding) / niceStep) * niceStep,
+    max: Math.ceil((dataMax + padding) / niceStep) * niceStep,
+  };
+}
 
 export default function DashboardPage() {
-  const [selected, setSelected] = useState(new Set(MOCK_PLAYERS));
-  const [appliedSelected, setAppliedSelected] = useState(new Set(MOCK_PLAYERS));
+  const [scores, setScores] = useState<DashboardScoresDTO | null>(null);
+  const [eloHistory, setEloHistory] = useState<EloHistoryDTO | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const series = useMemo(
-    () =>
-      MOCK_PLAYERS.filter((p) => appliedSelected.has(p)).map((p) => ({
-        name: p,
-        data: MOCK_SCORES[MOCK_PLAYERS.indexOf(p)]!,
-      })),
-    [appliedSelected]
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [appliedSelected, setAppliedSelected] = useState<Set<string>>(
+    new Set(),
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const [scoresRes, eloRes] = await Promise.all([
+          fetch("/api/dashboard/scores"),
+          fetch("/api/elo/history"),
+        ]);
+        if (!scoresRes.ok || !eloRes.ok)
+          throw new Error("Failed to load dashboard data.");
+        const scoresData: DashboardScoresDTO = await scoresRes.json();
+        const eloData: EloHistoryDTO = await eloRes.json();
+        if (cancelled) return;
+
+        setScores(scoresData);
+        setEloHistory(eloData);
+        setSelected(new Set());
+        setAppliedSelected(new Set());
+      } catch (err) {
+        if (!cancelled)
+          setError(
+            err instanceof Error ? err.message : "Something went wrong.",
+          );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const scoreLabels = useMemo(
+    () => scores?.data.map((d) => d.time) ?? [],
+    [scores],
+  );
+  const scoreSeries = useMemo(() => {
+    if (!scores) return [];
+    return scores.players
+      .map((name, i) => ({
+        name,
+        data: scores.data.map((d) => d.cumulative[i] ?? null),
+      }))
+      .filter((s) => appliedSelected.has(s.name));
+  }, [scores, appliedSelected]);
+
+  // Bounds from EVERY player's full series — deliberately NOT filtered by
+  // appliedSelected, so the axis doesn't move when the selection changes.
+  const scoreYBounds = useMemo(() => {
+    if (!scores) return undefined;
+    return computeStableBounds(
+      scores.players.map((_, i) =>
+        scores.data.map((d) => d.cumulative[i] ?? null),
+      ),
+    );
+  }, [scores]);
+
+  const eloLabels = useMemo(
+    () => eloHistory?.data.map((d) => d.time) ?? [],
+    [eloHistory],
+  );
+  const eloSeries = useMemo(() => {
+    if (!eloHistory) return [];
+    return eloHistory.players
+      .map((name, i) => ({
+        name,
+        data: eloHistory.data.map((d) => d.ratings[i] ?? null),
+      }))
+      .filter((s) => appliedSelected.has(s.name));
+  }, [eloHistory, appliedSelected]);
+
+  const eloYBounds = useMemo(() => {
+    if (!eloHistory) return undefined;
+    return computeStableBounds(
+      eloHistory.players.map((_, i) =>
+        eloHistory.data.map((d) => d.ratings[i] ?? null),
+      ),
+    );
+  }, [eloHistory]);
 
   function toggle(p: string) {
     const next = new Set(selected);
@@ -56,37 +150,72 @@ export default function DashboardPage() {
     setSelected(next);
   }
 
+  if (loading) {
+    return (
+      <Card>
+        <p className="text-center text-ink-400">Loading dashboard…</p>
+      </Card>
+    );
+  }
+
+  if (error || !scores) {
+    return (
+      <Card>
+        <p className="text-center text-lose">
+          ⚠️ {error ?? "No data available yet — add some games first."}
+        </p>
+      </Card>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <Card>
-        <h1 className="mb-4 text-lg font-extrabold text-ink-900">📊 Mahjong Dashboard</h1>
+        <h1 className="mb-4 text-lg font-extrabold text-ink-900">
+          📊 Mahjong Dashboard
+        </h1>
 
-        <p className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-400">Players</p>
-        <div className="mb-2">
-          <span className="mb-2 inline-block rounded-full bg-green-100 px-2 py-0.5 text-xs font-bold text-green-700">
-            🀄 Showing tonight&apos;s session players
-          </span>
-        </div>
-        <PlayerFilterChips players={MOCK_PLAYERS} selected={selected} onToggle={toggle} />
+        <p className="mb-2 text-xs font-bold uppercase tracking-wide text-ink-400">
+          Players
+        </p>
+        <PlayerFilterChips
+          players={scores.players}
+          selected={selected}
+          onToggle={toggle}
+        />
 
         <p className="mb-2 mt-5 text-xs font-bold uppercase tracking-wide text-ink-400">
           Date range
         </p>
-        {/* TODO: replace with real dual-range slider, see file header TODOs */}
+        {/* TODO: wire these up to actually filter — see file header TODOs */}
         <div className="mb-4 flex gap-3">
-          <input type="datetime-local" className="rounded-lg border border-ink-100 px-3 py-2 text-sm" />
-          <input type="datetime-local" className="rounded-lg border border-ink-100 px-3 py-2 text-sm" />
+          <input
+            type="datetime-local"
+            className="rounded-lg border border-ink-100 px-3 py-2 text-sm"
+          />
+          <input
+            type="datetime-local"
+            className="rounded-lg border border-ink-100 px-3 py-2 text-sm"
+          />
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setAppliedSelected(new Set(selected))}>Update Charts</Button>
-          <Button variant="secondary" onClick={() => setSelected(new Set(MOCK_PLAYERS))}>
+          <Button onClick={() => setAppliedSelected(new Set(selected))}>
+            Update Charts
+          </Button>
+          <Button
+            variant="secondary"
+            onClick={() => setSelected(new Set(scores.players))}
+          >
             Select All
           </Button>
           <Button variant="secondary" onClick={() => setSelected(new Set())}>
             Clear All
           </Button>
-          <Button variant="secondary" onClick={() => setSelected(new Set(MOCK_PLAYERS))}>
+          <Button
+            variant="secondary"
+            onClick={() => setSelected(new Set(scores.players))}
+          >
             Session Players
           </Button>
           <Button variant="secondary" onClick={() => {}}>
@@ -95,21 +224,35 @@ export default function DashboardPage() {
         </div>
       </Card>
 
-      <LineChartPanel
-        title="✏️ Cumulative Scores"
-        subtitle="Running total points per player over time"
-        labels={MOCK_LABELS}
-        series={series}
-        yLabel="Points"
-      />
+      {scoreSeries.length === 0 ? (
+        <Card>
+          <p className="text-center text-ink-400">
+            Select at least one player to see charts.
+          </p>
+        </Card>
+      ) : (
+        <>
+          <LineChartPanel
+            title="✏️ Cumulative Scores"
+            subtitle="Running total points per player over time"
+            labels={scoreLabels}
+            series={scoreSeries}
+            yLabel="Points"
+            yMin={scoreYBounds?.min}
+            yMax={scoreYBounds?.max}
+          />
 
-      <LineChartPanel
-        title="🏆 ELO Ratings Over Time"
-        subtitle="Skill rating progression — post April 25, 2026"
-        labels={MOCK_LABELS}
-        series={series.map((s) => ({ ...s, data: s.data.map((v) => v + 1500) }))}
-        yLabel="ELO Rating"
-      />
+          <LineChartPanel
+            title="🏆 ELO Ratings Over Time"
+            subtitle="Skill rating progression — post April 25, 2026"
+            labels={eloLabels}
+            series={eloSeries}
+            yLabel="ELO Rating"
+            yMin={eloYBounds?.min}
+            yMax={eloYBounds?.max}
+          />
+        </>
+      )}
 
       {/* TODO: Rank Over Time (bump chart, reverseYAxis) and
           Average ELO per Game Played (bar chart) panels go here. */}

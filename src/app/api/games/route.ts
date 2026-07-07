@@ -1,41 +1,127 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
-import { prisma } from '@/lib/prisma';
-import { computeFanScores, InvalidGameError } from '@/lib/scoring';
+import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { computeFanScores, InvalidGameError } from "@/lib/scoring";
 import {
   computeGameDeltas,
   applyDeltas,
   newPlayerState,
   type EloPlayerState,
-} from '@/lib/elo';
+} from "@/lib/elo";
 
-const SubmitGameSchema = z.object({
-  players: z.array(z.string()).length(4),
-  winner: z.string(),
-  fan: z.number().int().min(3).max(13),
-  isSelfDraw: z.boolean(),
-  loser: z.string().optional(),
-  sessionId: z.string().optional(), // present when submitted from a live session table
-  tableNumber: z.number().int().optional(),
-});
+const SubmitGameSchema = z
+  .object({
+    players: z.array(z.string()).length(4),
+    isDraw: z.boolean().default(false),
+    winner: z.string().optional(),
+    fan: z.number().int().min(3).max(13).optional(),
+    isSelfDraw: z.boolean().default(false),
+    loser: z.string().optional(),
+    sessionId: z.string().optional(), // present when submitted from a live session table
+    tableNumber: z.number().int().optional(),
+  })
+  .refine((data) => data.isDraw || (data.winner && data.fan), {
+    message: "winner and fan are required unless isDraw is true",
+  });
+
+// GET /api/games?q=&page=&pageSize= — powers /games (search + pagination
+// over the full game history). Search matches any of the 2-4 recorded
+// participants' names (winner/discarder always included; bystanders too
+// for games recorded through /session going forward).
+export async function GET(req: NextRequest) {
+  const { searchParams } = req.nextUrl;
+  const q = searchParams.get("q")?.trim() ?? "";
+  const page = Math.max(1, Number(searchParams.get("page") ?? 1));
+  const pageSize = Math.min(
+    100,
+    Math.max(1, Number(searchParams.get("pageSize") ?? 25)),
+  );
+
+  const where = q
+    ? {
+        scores: {
+          some: {
+            player: { name: { contains: q, mode: "insensitive" as const } },
+          },
+        },
+      }
+    : {};
+
+  const [total, games] = await Promise.all([
+    prisma.game.count({ where }),
+    prisma.game.findMany({
+      where,
+      orderBy: { playedAt: "desc" },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: {
+        scores: { include: { player: { select: { name: true, icon: true } } } },
+        winner: { select: { name: true } },
+        loser: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const rows = games.map((g) => ({
+    id: g.id,
+    playedAt: g.playedAt,
+    tableNumber: g.tableNumber,
+    fan: g.fan,
+    winType: g.winType,
+    winnerId: g.winnerId,
+    winnerName: g.winner?.name ?? null,
+    loserId: g.loserId,
+    loserName: g.loser?.name ?? null,
+    scores: g.scores
+      .map((s) => ({
+        playerId: s.playerId,
+        playerName: s.player.name,
+        icon: s.player.icon,
+        score: Number(s.score),
+      }))
+      .sort((a, b) => b.score - a.score),
+  }));
+
+  return NextResponse.json({ games: rows, total, page, pageSize });
+}
 
 // POST /api/games — Add New Game (fan-based scoring flow ported from
-// buildFanGameSidebar()/submitGame() in code.gs)
+// buildFanGameSidebar()/submitGame() in code.gs) + draws (see chat: the
+// original scripts had a "Draw" button with no backend logic behind it —
+// implemented here as all 4 players scoring 0, run through the same ELO
+// pipeline as any other game, which naturally produces small symmetric
+// ELO nudges without any special-case ELO math).
 export async function POST(req: NextRequest) {
   const parsed = SubmitGameSchema.safeParse(await req.json());
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.issues[0]?.message }, { status: 400 });
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message },
+      { status: 400 },
+    );
   }
   const input = parsed.data;
 
   let scores: Record<string, number>;
-  try {
-    scores = computeFanScores(input);
-  } catch (err) {
-    if (err instanceof InvalidGameError) {
-      return NextResponse.json({ error: err.message }, { status: 400 });
+  let winType: "discard" | "self_draw" | "draw";
+  if (input.isDraw) {
+    scores = Object.fromEntries(input.players.map((p) => [p, 0]));
+    winType = "draw";
+  } else {
+    try {
+      scores = computeFanScores({
+        players: input.players as [string, string, string, string],
+        winner: input.winner!,
+        fan: input.fan!,
+        isSelfDraw: input.isSelfDraw,
+        loser: input.loser,
+      });
+    } catch (err) {
+      if (err instanceof InvalidGameError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
     }
-    throw err;
+    winType = input.isSelfDraw ? "self_draw" : "discard";
   }
 
   // TODO(transaction): wrap everything below in `prisma.$transaction(...)`
@@ -44,18 +130,23 @@ export async function POST(req: NextRequest) {
 
   // 1. Insert the game + per-player scores, tagged with the active season
   //    so it's automatically scoped correctly in leaderboard/dashboard/etc.
-  const activeSeason = await prisma.season.findFirst({ where: { isActive: true } });
+  const activeSeason = await prisma.season.findFirst({
+    where: { isActive: true },
+  });
   const game = await prisma.game.create({
     data: {
-      winType: input.isSelfDraw ? 'self_draw' : 'discard',
-      fan: input.fan,
-      winnerId: input.winner,
-      loserId: input.isSelfDraw ? null : input.loser,
+      winType,
+      fan: input.isDraw ? undefined : input.fan,
+      winnerId: input.isDraw ? undefined : input.winner,
+      loserId: input.isDraw || input.isSelfDraw ? undefined : input.loser,
       sessionId: input.sessionId,
       seasonId: activeSeason?.id,
       tableNumber: input.tableNumber,
       scores: {
-        create: Object.entries(scores).map(([playerId, score]) => ({ playerId, score })),
+        create: Object.entries(scores).map(([playerId, score]) => ({
+          playerId,
+          score,
+        })),
       },
     },
   });
@@ -78,7 +169,10 @@ export async function POST(req: NextRequest) {
       : newPlayerState();
   });
 
-  const participants = input.players.map((id) => ({ name: id, score: scores[id]! }));
+  const participants = input.players.map((id) => ({
+    name: id,
+    score: scores[id]!,
+  }));
   const deltas = computeGameDeltas(participants, stateByName);
   applyDeltas(participants, stateByName, deltas);
 
@@ -101,7 +195,7 @@ export async function POST(req: NextRequest) {
           last5Deltas: s.last5,
         },
       });
-    })
+    }),
   );
 
   await prisma.eloHistory.createMany({

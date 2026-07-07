@@ -67,3 +67,30 @@ export interface NetworkDataDTO {
   players: string[];
   rows: NetworkGameRow[];
 }
+
+export interface GameScoreEntryDTO {
+  playerId: string;
+  playerName: string;
+  icon: string | null;
+  score: number;
+}
+
+export interface GameRowDTO {
+  id: string;
+  playedAt: string;
+  tableNumber: number | null;
+  fan: number | null;
+  winType: "discard" | "self_draw" | "draw" | "manual" | null;
+  winnerId: string | null;
+  winnerName: string | null;
+  loserId: string | null;
+  loserName: string | null;
+  scores: GameScoreEntryDTO[];
+}
+
+export interface GamesListDTO {
+  games: GameRowDTO[];
+  total: number;
+  page: number;
+  pageSize: number;
+}

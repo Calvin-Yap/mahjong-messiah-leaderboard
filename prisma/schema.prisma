@@ -15,6 +15,7 @@ datasource db {
 enum WinType {
   discard
   self_draw
+  draw
   manual
 }
 

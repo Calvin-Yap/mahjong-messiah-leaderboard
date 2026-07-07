@@ -5,10 +5,11 @@ import { prisma } from '@/lib/prisma';
 // read from the permanent season_history table (never truncated).
 export async function GET(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   const rows = await prisma.seasonHistory.findMany({
-    where: { seasonId: params.id },
+    where: { seasonId: id },
     orderBy: { finalRank: 'asc' },
     include: { player: { select: { name: true, icon: true } } },
   });

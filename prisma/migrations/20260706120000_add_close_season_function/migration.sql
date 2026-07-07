@@ -1,37 +1,24 @@
--- Run once after `npm run db:migrate`:
---   psql "$DIRECT_URL" -f prisma/sql/end_season.sql
--- (or paste into the Supabase SQL Editor).
+-- Promotes close_season()/purge_season_data() from prisma/sql/end_season.sql
+-- into an actual migration, so `npm run db:migrate` / `prisma migrate deploy`
+-- creates them automatically instead of requiring a manual psql/Supabase SQL
+-- Editor step (which is easy to forget — see the elo_history "draw" enum
+-- issue for a real example of that gap biting us).
 --
--- FIX (2026-07): every id column in this schema is `String @id @default(uuid())`
--- in Prisma, which maps to Postgres `text` — NOT the native `uuid` type.
--- This function originally declared its variables as `UUID`, which throws
--- "operator does not exist: text = uuid" the moment it compares against
--- any real column (seasons.id, games.season_id, elo_state.player_id, etc.).
--- Every UUID below is now TEXT to match. If you ever migrate id columns to
--- native `@db.Uuid`, this file would need to change back.
---
--- DESIGN NOTE — why "close" and "purge" are two separate functions:
--- Given the storage math (see chat), there is no urgency to delete
--- per-game data at all. `close_season()` snapshots + starts the next
--- season and leaves all raw game data in place, tagged with season_id —
--- this is fully reversible and costs you nothing. `purge_season_data()`
--- is the literal "delete rows to reclaim space" operation from the
--- original ask, kept as a separate, manual, rarely-invoked function so
--- it can never fire as a side effect of the normal "End Season" button.
--- Only run it once you've actually confirmed a backup export succeeded.
+-- Both functions use CREATE OR REPLACE, so re-running this migration (or
+-- the original prisma/sql/end_season.sql by hand) is always safe/idempotent.
 
 -- ============================================================
 -- close_season(): snapshot the active season, start the next one
 -- ============================================================
 CREATE OR REPLACE FUNCTION close_season(
   p_next_season_name TEXT,
-  p_reset_elo BOOLEAN DEFAULT true  -- see ELO reset decision in chat; flip to false to carry ratings forward
+  p_reset_elo BOOLEAN DEFAULT true  -- flip to false to carry ratings forward instead of resetting to 1500
 )
-RETURNS TEXT AS $$
+RETURNS UUID AS $$
 DECLARE
-  v_active_season_id TEXT;
+  v_active_season_id UUID;
   v_next_season_number INT;
-  v_next_season_id TEXT;
+  v_next_season_id UUID;
 BEGIN
   SELECT id INTO v_active_season_id FROM seasons WHERE is_active = true LIMIT 1;
   IF v_active_season_id IS NULL THEN
@@ -89,8 +76,9 @@ BEGIN
   -- 2. Close out the old season.
   UPDATE seasons SET is_active = false, ended_at = now() WHERE id = v_active_season_id;
 
-  -- 3. ELO reset decision (default: full reset to 1500 — see chat for the
-  --    partial-carry-forward alternative if you'd rather not fully reset).
+  -- 3. ELO reset — default is a full reset to 1500 for every player, so
+  --    the new season starts everyone even. Flip p_reset_elo to false to
+  --    carry ratings forward instead.
   IF p_reset_elo THEN
     UPDATE elo_state SET rating = 1500, games_played = 0, peak_rating = 1500, last5_deltas = '{}';
   END IF;
@@ -111,7 +99,7 @@ $$ LANGUAGE plpgsql;
 -- for an already-closed, already-snapshotted season. Only run this
 -- after confirming a backup export (see README) succeeded.
 -- ============================================================
-CREATE OR REPLACE FUNCTION purge_season_data(p_season_id TEXT)
+CREATE OR REPLACE FUNCTION purge_season_data(p_season_id UUID)
 RETURNS VOID AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM seasons WHERE id = p_season_id AND is_active = true) THEN

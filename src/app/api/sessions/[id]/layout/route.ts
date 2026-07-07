@@ -14,16 +14,20 @@ const LayoutSchema = z.object({
 // Supabase Realtime channel scoped to this session id so every device
 // with the session page open updates without polling. Something like:
 //   supabase.channel(`session:${sessionId}`).send({ type: 'broadcast', event: 'layout', payload })
-export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
   const { tables, sideline } = LayoutSchema.parse(await req.json());
 
   await prisma.$transaction([
-    prisma.sessionTable.deleteMany({ where: { sessionId: params.id } }),
-    prisma.sessionSideline.deleteMany({ where: { sessionId: params.id } }),
+    prisma.sessionTable.deleteMany({ where: { sessionId: id } }),
+    prisma.sessionSideline.deleteMany({ where: { sessionId: id } }),
     prisma.sessionTable.createMany({
       data: Object.entries(tables).flatMap(([tableNumber, playerIds]) =>
         playerIds.map((playerId, i) => ({
-          sessionId: params.id,
+          sessionId: id,
           tableNumber: Number(tableNumber),
           seatPosition: i + 1,
           playerId,
@@ -31,7 +35,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       ),
     }),
     prisma.sessionSideline.createMany({
-      data: sideline.map((playerId) => ({ sessionId: params.id, playerId })),
+      data: sideline.map((playerId) => ({ sessionId: id, playerId })),
     }),
   ]);
 
