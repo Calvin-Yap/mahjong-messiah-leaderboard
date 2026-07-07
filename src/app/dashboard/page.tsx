@@ -25,33 +25,6 @@ import { PlayerFilterChips } from "@/components/dashboard/PlayerFilterChips";
 import { LineChartPanel } from "@/components/dashboard/LineChartPanel";
 import type { DashboardScoresDTO, EloHistoryDTO } from "@/lib/types";
 
-/**
- * Computes fixed axis bounds from ALL series (every player), not just the
- * currently-selected ones. This is what keeps the Y axis stable when
- * toggling players — computing bounds from only the visible/selected
- * series is exactly what caused the axis to stretch/jump on every
- * selection change, since Chart.js auto-scales to whatever's passed in.
- */
-function computeStableBounds(valuesByPlayer: (number | null)[][]): {
-  min: number;
-  max: number;
-} {
-  const flat = valuesByPlayer.flat().filter((v): v is number => v !== null);
-  if (flat.length === 0) return { min: 0, max: 1 };
-
-  const dataMin = Math.min(...flat);
-  const dataMax = Math.max(...flat);
-  const range = dataMax - dataMin || Math.abs(dataMax) || 1;
-  const padding = range * 0.1;
-
-  // Round to a "nice" step so the axis doesn't show awkward decimals.
-  const niceStep = Math.pow(10, Math.floor(Math.log10(range)) - 1) || 1;
-  return {
-    min: Math.floor((dataMin - padding) / niceStep) * niceStep,
-    max: Math.ceil((dataMax + padding) / niceStep) * niceStep,
-  };
-}
-
 export default function DashboardPage() {
   const [scores, setScores] = useState<DashboardScoresDTO | null>(null);
   const [eloHistory, setEloHistory] = useState<EloHistoryDTO | null>(null);
@@ -110,17 +83,6 @@ export default function DashboardPage() {
       .filter((s) => appliedSelected.has(s.name));
   }, [scores, appliedSelected]);
 
-  // Bounds from EVERY player's full series — deliberately NOT filtered by
-  // appliedSelected, so the axis doesn't move when the selection changes.
-  const scoreYBounds = useMemo(() => {
-    if (!scores) return undefined;
-    return computeStableBounds(
-      scores.players.map((_, i) =>
-        scores.data.map((d) => d.cumulative[i] ?? null),
-      ),
-    );
-  }, [scores]);
-
   const eloLabels = useMemo(
     () => eloHistory?.data.map((d) => d.time) ?? [],
     [eloHistory],
@@ -135,18 +97,13 @@ export default function DashboardPage() {
       .filter((s) => appliedSelected.has(s.name));
   }, [eloHistory, appliedSelected]);
 
-  const eloYBounds = useMemo(() => {
-    if (!eloHistory) return undefined;
-    return computeStableBounds(
-      eloHistory.players.map((_, i) =>
-        eloHistory.data.map((d) => d.ratings[i] ?? null),
-      ),
-    );
-  }, [eloHistory]);
-
   function toggle(p: string) {
     const next = new Set(selected);
-    next.has(p) ? next.delete(p) : next.add(p);
+    if (next.has(p)) {
+      next.delete(p);
+    } else {
+      next.add(p);
+    }
     setSelected(next);
   }
 
@@ -238,8 +195,6 @@ export default function DashboardPage() {
             labels={scoreLabels}
             series={scoreSeries}
             yLabel="Points"
-            yMin={scoreYBounds?.min}
-            yMax={scoreYBounds?.max}
           />
 
           <LineChartPanel
@@ -248,8 +203,6 @@ export default function DashboardPage() {
             labels={eloLabels}
             series={eloSeries}
             yLabel="ELO Rating"
-            yMin={eloYBounds?.min}
-            yMax={eloYBounds?.max}
           />
         </>
       )}

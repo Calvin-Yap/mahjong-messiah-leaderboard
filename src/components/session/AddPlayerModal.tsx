@@ -1,24 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import dynamic from "next/dynamic";
-import type { EmojiClickData } from "emoji-picker-react";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import clsx from "clsx";
-
-// emoji-picker-react touches `window` at import time, so it can only ever
-// render on the client — dynamic-import it with ssr disabled rather than
-// a plain top-level import, or Next.js's server render of this modal's
-// parent tree would blow up.
-const FullEmojiPicker = dynamic(() => import("emoji-picker-react"), {
-  ssr: false,
-  loading: () => (
-    <p className="py-6 text-center text-sm text-ink-400">
-      Loading emoji picker…
-    </p>
-  ),
-});
 
 // Quick emoji list ported from buildAddPlayerDialog() in code.gs.
 const QUICK_EMOJI = [
@@ -83,8 +68,6 @@ export function AddPlayerModal({
   const [tab, setTab] = useState<"emoji" | "image">("emoji");
   const [name, setName] = useState("");
   const [emoji, setEmoji] = useState("");
-  const [showFullPicker, setShowFullPicker] = useState(false);
-  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -92,12 +75,9 @@ export function AddPlayerModal({
     setError(null);
     if (!name.trim()) return setError("Player name cannot be empty.");
 
-    const icon = tab === "emoji" ? emoji.trim() : imageDataUrl;
-    if (!icon)
-      return setError(
-        `Please ${tab === "emoji" ? "select or enter an emoji" : "upload an image"}.`,
-      );
-    if (tab === "emoji" && existingIcons.includes(icon)) {
+    const icon = emoji.trim();
+    if (!icon) return setError("Please select or enter an emoji.");
+    if (existingIcons.includes(icon)) {
       return setError(
         "That icon is already used by another player. Please choose a different one.",
       );
@@ -105,9 +85,6 @@ export function AddPlayerModal({
 
     setSubmitting(true);
     try {
-      // TODO(storage): for tab === 'image', upload `imageDataUrl` to Supabase
-      // Storage first and pass the resulting public URL as `icon` instead of
-      // a base64 data URL — matches the plan's Section 3.2 recommendation.
       const res = await fetch("/api/players", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -183,35 +160,6 @@ export function AddPlayerModal({
             );
           })}
         </div>
-
-        <button
-          type="button"
-          onClick={() => setShowFullPicker((v) => !v)}
-          className="mt-2 text-xs font-semibold text-brand-600 hover:underline"
-        >
-          {showFullPicker ? "▲ Hide full emoji list" : "🔍 Browse all emojis…"}
-        </button>
-
-        {showFullPicker && (
-          <div className="mt-2 overflow-hidden rounded-lg border border-ink-100">
-            <FullEmojiPicker
-              width="100%"
-              height={320}
-              previewConfig={{ showPreview: false }}
-              onEmojiClick={(data: EmojiClickData) => {
-                if (existingIcons.includes(data.emoji)) {
-                  setError(
-                    "That icon is already used by another player. Please choose a different one.",
-                  );
-                  return;
-                }
-                setError(null);
-                setEmoji(data.emoji);
-                setShowFullPicker(false);
-              }}
-            />
-          </div>
-        )}
       </>
 
       {error && (
